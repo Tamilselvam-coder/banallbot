@@ -170,7 +170,7 @@ async def kickall(event):
     try:
         async for user in client.iter_participants(chat):
             total_users += 1
-            if user.id in admin_ids or user.is_bot: # Skip admins and bots
+            if user.id in admin_ids or user.bot: # Skip admins and bots
                 continue
 
             try:
@@ -244,7 +244,7 @@ async def banall(event):
     try:
         async for user in client.iter_participants(chat):
             total_users += 1
-            if user.id in admin_ids or user.is_bot: # Skip admins and bots
+            if user.id in admin_ids or user.bot: # Skip admins and bots
                 continue
 
             try:
