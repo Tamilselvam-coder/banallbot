@@ -26,6 +26,7 @@ from var import Var # Bot's API_ID, API_HASH, BOT_TOKEN, SUDO list
 # --- Constants ---
 SUDO_FILE = "sudo_users.txt"
 USER_SESSIONS_DIR = "user_sessions/" # Directory to store user session files
+BOT_USERS_FILE = "bot_users.txt" # File to store IDs of users who started the bot
 ACTION_SLEEP_INTERVAL = 0.8 # Base sleep time
 
 # --- Logging ---
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 user_clients = {}
 # Dictionary to track login process state {user_id: {'stage': 'api_id', 'data': {}}}
 login_sessions = {}
+# Set to store known user IDs who have started the bot (loaded from file)
+known_user_ids = set()
 
 # --- Dynamic SUDO Users List ---
 CORE_SUDO_USERS = set()
@@ -68,6 +71,21 @@ except Exception as e:
 
 SUDO_USERS = CORE_SUDO_USERS.union(DYNAMIC_SUDO_USERS)
 logger.info(f"Total active SUDO users: {SUDO_USERS}")
+
+# --- Load Known Bot Users ---
+try:
+    with open(BOT_USERS_FILE, 'r') as f:
+        for line in f:
+            try:
+                known_user_ids.add(int(line.strip()))
+            except ValueError:
+                logger.warning(f"Skipping invalid line in {BOT_USERS_FILE}: {line.strip()}")
+    logger.info(f"Loaded {len(known_user_ids)} known user IDs from {BOT_USERS_FILE}")
+except FileNotFoundError:
+    logger.info(f"{BOT_USERS_FILE} not found. Will be created when users start the bot.")
+except Exception as e:
+    logger.error(f"Error reading {BOT_USERS_FILE}: {e}")
+
 
 # --- Initialize Bot's Main Telegram Client ---
 try:
@@ -125,6 +143,10 @@ async def get_target_chat_id(event, client_to_use):
 async def check_client_permissions(event, client_to_use, target_chat_id, rights_needed):
     """Checks if the specified client has the necessary admin rights in the target chat."""
     if not target_chat_id: return False # Cannot check without target
+    if not client_to_use or not client_to_use.is_connected():
+         # Handle case where user client might not be logged in or connected
+         await event.reply("Error: Client is not connected or available.")
+         return False
     try:
         chat = await client_to_use.get_entity(target_chat_id)
         me = await client_to_use.get_me()
@@ -307,7 +329,9 @@ async def login_handler(event):
                 await event.reply(f"❌ An unexpected error occurred during connection: {type(e).__name__}")
                 if 'temp_client' in locals() and temp_client.is_connected():
                     await temp_client.disconnect()
-                del login_sessions[user_id]
+                # Ensure cleanup even if temp_client wasn't assigned
+                if user_id in login_sessions:
+                    del login_sessions[user_id]
 
 
         elif stage == 'code':
@@ -427,14 +451,27 @@ async def logout(event):
 
 @client.on(events.NewMessage(pattern="^/start$", func=lambda e: e.is_private))
 async def start(event):
+    """Handler for /start command in private chat. Also logs user ID."""
     user = await event.get_sender()
     name = get_display_name(user)
     user_id = user.id
     logger.info(f"/start command received from {name} (ID: {user_id})")
     is_sudo = user_id in SUDO_USERS
+
+    # --- Log User ID if New ---
+    if user_id not in known_user_ids:
+        known_user_ids.add(user_id)
+        try:
+            with open(BOT_USERS_FILE, 'a') as f:
+                f.write(f"{user_id}\n")
+            logger.info(f"New user {user_id} ({name}) added to {BOT_USERS_FILE}")
+        except Exception as e:
+            logger.error(f"Failed to write new user {user_id} to {BOT_USERS_FILE}: {e}")
+    # --- End Log User ID ---
+
     welcome_text = (
         f"Hello {name}!\n\n"
-        "I am the group and channel ban and unban bot Manager Bot.\n"
+        "I am the Daxx Manager Bot.\n"
     )
     if is_sudo:
         welcome_text += ("You are a SUDO user. You can manage your own Telegram sessions "
@@ -454,38 +491,43 @@ async def help_command(event):
     name = get_display_name(await event.get_sender())
     logger.info(f"/help command received from {name} (ID: {user_id})")
 
+    # Define command prefix based on Var or default
+    CMD_PREFIX = Var.CMD_PREFIX if hasattr(Var, 'CMD_PREFIX') else "/"
+
     help_text = f"Hi {name}! Commands available:\n\n"
-    help_text += "`!ping` - Check bot's responsiveness.\n" # Use !ping for bot ping to avoid conflict if user is logged in
-    help_text += "`!start` - Show welcome message (PM only).\n"
-    help_text += "`!help` - Show this message.\n"
+    help_text += f"`{CMD_PREFIX}ping` - Check bot's responsiveness.\n"
+    help_text += f"`{CMD_PREFIX}start` - Show welcome message (PM only).\n"
+    help_text += f"`{CMD_PREFIX}help` - Show this message.\n"
 
     if user_id in SUDO_USERS:
         help_text += "\n**SUDO User Management:**\n"
-        help_text += "`!addsudo <user_id/reply>` - Add user to bot's SUDO list.\n"
-        help_text += "`!delsudo <user_id/reply>` - Remove user from bot's SUDO list.\n"
-        help_text += "`!restart` - Restart the bot.\n"
+        help_text += f"`{CMD_PREFIX}addsudo <user_id/reply>` - Add user to bot's SUDO list.\n"
+        help_text += f"`{CMD_PREFIX}delsudo <user_id/reply>` - Remove user from bot's SUDO list.\n"
+        help_text += f"`{CMD_PREFIX}restart` - Restart the bot.\n"
 
         help_text += "\n**Your Account Management (SUDO Only):**\n"
-        help_text += "`!login` - Log in with your own Telegram account.\n"
-        help_text += "`!logout` - Log out your account session.\n"
+        help_text += f"`{CMD_PREFIX}login` - Log in with your own Telegram account.\n"
+        help_text += f"`{CMD_PREFIX}logout` - Log out your account session.\n"
 
         help_text += "\n**Bot Actions (Requires Bot Admin in Target Chat):**\n"
-        help_text += "`!bbanall <chat_id>` - Bot bans all non-admins.\n"
-        help_text += "`!bkickall <chat_id>` - Bot kicks all non-admins.\n"
-        help_text += "`!bunbanall <chat_id>` - Bot unbans all.\n"
-        help_text += "`!bleave [chat_id]` - Bot leaves current or specified chat.\n"
+        help_text += f"`{CMD_PREFIX}bbanall <chat_id>` - Bot bans all non-admins.\n"
+        help_text += f"`{CMD_PREFIX}bkickall <chat_id>` - Bot kicks all non-admins.\n"
+        help_text += f"`{CMD_PREFIX}bunbanall <chat_id>` - Bot unbans all.\n"
+        help_text += f"`{CMD_PREFIX}bleave [chat_id]` - Bot leaves current or specified chat.\n"
 
         help_text += "\n**User Actions (Uses Your Logged-in Account, Requires *You* Have Admin in Target Chat):**\n"
-        help_text += "`!ubanall <chat_id>` - You ban all non-admins.\n"
-        help_text += "`!ukickall <chat_id>` - You kick all non-admins.\n"
-        help_text += "`!uunbanall <chat_id>` - You unban all.\n"
-        help_text += "`!uleave <chat_id>` - Your account leaves the specified chat.\n"
+        help_text += f"`{CMD_PREFIX}ubanall <chat_id>` - You ban all non-admins.\n"
+        help_text += f"`{CMD_PREFIX}ukickall <chat_id>` - You kick all non-admins.\n"
+        help_text += f"`{CMD_PREFIX}uunbanall <chat_id>` - You unban all.\n"
+        help_text += f"`{CMD_PREFIX}uleave <chat_id>` - Your account leaves the specified chat.\n"
         help_text += "\n`<chat_id>` can be the numerical ID or the @username / t.me/joinchat link."
 
-    await event.reply(help_text.replace('!', Var.CMD_PREFIX if hasattr(Var, 'CMD_PREFIX') else '/'), parse_mode='md')
+    # Replace the placeholder '!' used in the original help text construction with the actual prefix
+    # This step is removed as we now construct the help text directly with CMD_PREFIX
+    await event.reply(help_text, parse_mode='md')
 
 
-@client.on(events.NewMessage(pattern="^/ping$")) # Changed prefix later if needed
+@client.on(events.NewMessage(pattern="^/ping$")) # Keep standard /ping for bot itself
 async def ping(event):
     # Allow anyone to ping the bot itself
     start = datetime.now()
@@ -494,9 +536,10 @@ async def ping(event):
     ms = (end - start).total_seconds() * 1000
     await reply_msg.edit(f"**Bot is On** \n\n __Pong__ !! `{ms:.3f}` ms")
 
-# --- SUDO Management Commands --- (Using !, adjust prefix in help/Var.CMD_PREFIX)
+# --- SUDO Management Commands ---
 
-CMD_PREFIX = Var.CMD_PREFIX if hasattr(Var, 'CMD_PREFIX') else "/" # Use '/' if not defined
+# Define command prefix based on Var or default
+CMD_PREFIX = Var.CMD_PREFIX if hasattr(Var, 'CMD_PREFIX') else "/"
 
 @client.on(events.NewMessage(pattern=f"^{re.escape(CMD_PREFIX)}addsudo(?: |$)"))
 async def add_sudo(event):
@@ -556,24 +599,28 @@ async def execute_mass_action(event, action_type, client_to_use, is_bot_client):
     sender_id = event.sender_id
     if sender_id not in SUDO_USERS: return
 
-    if not is_bot_client and sender_id not in user_clients:
-        await event.reply("You need to be logged in first using /login to use user actions.")
-        return
+    # Check if the client (bot or user) is available and connected
+    if not client_to_use or not client_to_use.is_connected():
+         client_name = "Bot" if is_bot_client else "Your account"
+         await event.reply(f"Error: {client_name} client is not connected. Please ensure the bot is running or you are logged in (/login).")
+         return
 
     target_chat_id = await get_target_chat_id(event, client_to_use)
     if not target_chat_id: return
 
     required_permission = 'ban' if 'ban' in action_type else 'kick'
     if not await check_client_permissions(event, client_to_use, target_chat_id, [required_permission]):
-        client_name = "Bot" if is_bot_client else f"User `{sender_id}`"
         # Error message already sent by check_client_permissions
-        # await event.reply(f"{client_name} lacks necessary permissions in the target chat.")
         return
 
     # Determine action specifics
     if action_type == "banall":
         action_name = "Banning"
-        rights = BAN_RIGHTS
+        rights = ChatBannedRights( # Define BAN_RIGHTS locally for clarity/safety
+            until_date=None, view_messages=True, send_messages=True, send_media=True,
+            send_stickers=True, send_gifs=True, send_games=True, send_inline=True,
+            embed_links=True,
+        )
         filter_type = None # Iterate all participants
         success_verb = "Banned"
     elif action_type == "kickall":
@@ -583,7 +630,7 @@ async def execute_mass_action(event, action_type, client_to_use, is_bot_client):
         success_verb = "Kicked"
     elif action_type == "unbanall":
         action_name = "Unbanning"
-        rights = UNBAN_RIGHTS
+        rights = ChatBannedRights(until_date=0, view_messages=False) # Define UNBAN_RIGHTS locally
         filter_type = types.ChannelParticipantsKicked # Iterate banned
         success_verb = "Unbanned"
     else:
@@ -591,14 +638,16 @@ async def execute_mass_action(event, action_type, client_to_use, is_bot_client):
         return
 
     status_message = await event.reply(f"{action_name} members in chat `{target_chat_id}`...")
-    if hasattr(event, 'delete'): await event.delete() # Delete command if possible
+    # Don't delete the command immediately, wait until completion or error
+    # if hasattr(event, 'delete'): await event.delete()
 
     try:
         me = await client_to_use.get_me()
         admin_ids = set()
         if action_type != "unbanall": # No need to check admins when unbanning
-            admins = await client_to_use.get_participants(target_chat_id, filter=types.ChannelParticipantsAdmins)
-            admin_ids = {admin.id for admin in admins}
+            # Fetch admins using the client performing the action
+            async for admin in client_to_use.iter_participants(target_chat_id, filter=types.ChannelParticipantsAdmins):
+                 admin_ids.add(admin.id)
             admin_ids.add(me.id) # Ensure client doesn't action itself
 
         processed_count = 0
@@ -622,7 +671,8 @@ async def execute_mass_action(event, action_type, client_to_use, is_bot_client):
                     await client_to_use(EditBannedRequest(target_chat_id, user.id, rights))
 
                 processed_count += 1
-                logger.info(f"{success_verb} user {user.id} from {target_chat_id} by client {me.id}")
+                # Avoid logging too frequently during mass actions
+                # logger.info(f"{success_verb} user {user.id} from {target_chat_id} by client {me.id}")
                 await asyncio.sleep(ACTION_SLEEP_INTERVAL if action_type != "unbanall" else ACTION_SLEEP_INTERVAL / 2)
 
             except FloodWaitError as fwe:
@@ -631,23 +681,27 @@ async def execute_mass_action(event, action_type, client_to_use, is_bot_client):
                 await asyncio.sleep(fwe.seconds + 5)
                 # Optional: Retry the last failed action here? Could get complex.
             except (UserAdminInvalidError, UserCreatorError):
-                logger.warning(f"Skipping admin/creator {user.id} during {action_type} by {me.id}.")
+                # logger.warning(f"Skipping admin/creator {user.id} during {action_type} by {me.id}.")
                 if action_type != "unbanall": admin_ids.add(user.id) # Add to known admins
                 error_count += 1
             except (ChatAdminRequiredError, ChatWriteForbiddenError):
                 logger.error(f"Client {me.id} lost permissions during {action_type} in {target_chat_id}.")
                 await status_message.edit(f"Error: Client `{me.id}` lost required permissions.")
-                return
+                return # Stop the operation
             except UserNotParticipantError:
-                 logger.warning(f"User {user.id} not participant during {action_type} by {me.id}.")
+                 # logger.warning(f"User {user.id} not participant during {action_type} by {me.id}.")
                  error_count +=1
             except (UserIdInvalidError, PeerIdInvalidError):
-                 logger.warning(f"Invalid user ID {user.id} encountered by {me.id}.")
+                 # logger.warning(f"Invalid user ID {user.id} encountered by {me.id}.")
                  error_count += 1
             except Exception as e:
+                # Log other errors but continue if possible
                 logger.error(f"Failed to {action_type.replace('all','')} {user.id} by {me.id}: {type(e).__name__}: {e}")
                 error_count += 1
                 await asyncio.sleep(ACTION_SLEEP_INTERVAL) # Still sleep on other errors
+
+        # Log summary at the end
+        logger.info(f"{action_type} completed by {me.id} in {target_chat_id}. Processed: {processed_count}, Errors: {error_count}, Checked: {total_checked}")
 
         final_message = (f"**{action_name.replace('ing','')} All Complete!** (Chat: `{target_chat_id}`)\n\n"
                          f"**{success_verb}:** `{processed_count}`\n"
@@ -681,16 +735,23 @@ async def bot_leave(event):
     target_chat_id_str = event.pattern_match.group(1)
     status_message = await event.reply("Processing bot leave command...")
 
+    target_chat_id = None # Initialize target_chat_id
     if target_chat_id_str:
-        try: target_chat_id = await get_target_chat_id(event, client) # Use helper
-        except ValueError: return # Error handled by helper
+        target_chat_id = await get_target_chat_id(event, client) # Use helper
+        if not target_chat_id:
+             # Error message handled by helper, just return
+             return
     else: # Leave current chat
-        if not event.is_private and event.chat_id: target_chat_id = event.chat_id
+        if not event.is_private and event.chat_id:
+             target_chat_id = event.chat_id
         else:
             await status_message.edit("Use this command in the group/channel or provide its ID/Username.")
             return
 
-    if not target_chat_id: return # Error handled by helper
+    # Ensure target_chat_id was set
+    if not target_chat_id:
+         await status_message.edit("Could not determine target chat.")
+         return
 
     try:
         await client(LeaveChannelRequest(target_chat_id))
@@ -699,7 +760,11 @@ async def bot_leave(event):
             await status_message.edit(f"Bot successfully left chat `{target_chat_id}`")
             await asyncio.sleep(3); await status_message.delete()
         else: # Can't edit message in chat bot just left
-             pass # Maybe PM confirmation? See previous version's logic
+             # Send confirmation to the SUDO user in PM
+             try:
+                 await client.send_message(event.sender_id, f"Bot successfully left chat `{target_chat_id}`")
+             except Exception as pm_error:
+                 logger.warning(f"Could not send leave confirmation PM to {event.sender_id}: {pm_error}")
     except (UserNotParticipantError, errors.ChatForbiddenError, errors.ChannelPrivateError):
          await status_message.edit(f"Bot is not in chat `{target_chat_id}` or cannot leave it.")
     except Exception as e:
@@ -735,7 +800,8 @@ async def user_leave(event):
     status_message = await event.reply("Processing user leave command...")
     target_chat_id = await get_target_chat_id(event, user_client)
     if not target_chat_id:
-        await status_message.delete() # Clean up status message
+        # Error message handled by helper, delete status msg if needed
+        # await status_message.delete() # Optional: clean up
         return
 
     try:
@@ -764,7 +830,8 @@ async def restart(event):
             if u_client.is_connected(): await u_client.disconnect()
             logger.info(f"Disconnected client for user {user_id}")
         except Exception as e: logger.error(f"Error disconnecting client for user {user_id}: {e}")
-        del user_clients[user_id] # Remove from active dict
+        # Don't remove from dict here, let the process end handle it or restart logic
+        # del user_clients[user_id] # Remove from active dict
 
     # Disconnect bot client
     try:
@@ -777,55 +844,51 @@ async def restart(event):
     try: os.execl(sys.executable, sys.executable, *sys.argv)
     except Exception as e:
         logger.critical(f"!!! FAILED TO RESTART SCRIPT: {e} !!!")
+        # Attempt to exit gracefully if execl fails
         sys.exit(1)
 
 # --- Main Execution ---
 async def main():
     """Connects the bot and runs it."""
+    global client # Ensure we are using the global client instance
+
     try:
-        # Connect the main bot client
-        # Use bot_token for authentication
+        # Connect the main bot client using bot_token for authentication
         await client.start(bot_token=Var.BOT_TOKEN)
         logger.info("Bot client started successfully.")
 
-        # Optional: Attempt to reconnect logged-in user sessions on startup
-        # This is complex due to potential auth issues after restart
-        # Basic example (might need more robust error handling):
-        # for session_file in os.listdir(USER_SESSIONS_DIR):
-        #     if session_file.endswith(".session") and session_file.startswith("user_"):
-        #         user_id_str = session_file.split('_')[1].split('.')[0]
-        #         try:
-        #             user_id = int(user_id_str)
-        #             logger.info(f"Attempting to reconnect user {user_id} from session...")
-        #             # Need API ID/Hash - cannot reliably get these after restart
-        #             # This approach requires storing API ID/Hash securely, which is risky
-        #             # Or, prompt users to /login again after restart.
-        #         except ValueError: continue
-        #         except Exception as e: logger.error(f"Failed reconnect for {user_id}: {e}")
-
         # Keep the bot running
         print("\n---------------------------------------")
-        print(" MANAGER 𝐁𝐎𝐓 IS RUNNING")
+        print("𝐃𝐀𝐗𝐗 𝐓𝐄𝐀𝐌 MANAGER 𝐁𝐎𝐓 IS RUNNING")
         print(f" Command Prefix: {CMD_PREFIX}")
         print(f" Active SUDO Users: {SUDO_USERS}")
+        print(f" Known Bot Users: {len(known_user_ids)}")
         print(" Ensure user_sessions/ directory exists.")
+        print(" Ensure bot_users.txt exists (or will be created).")
         print("---------------------------------------\n")
         await client.run_until_disconnected()
 
     except ApiIdInvalidError:
          logger.critical("Bot's API ID or Hash is invalid. Please check var.py.")
+    except errors.BotTokenInvalidError:
+         logger.critical("Bot's Token is invalid. Please check var.py.")
     except Exception as e:
         logger.exception("Critical error during bot startup or runtime.")
     finally:
         # Cleanup on exit
         logger.info("Disconnecting remaining clients...")
         for user_id, u_client in user_clients.items():
-            if u_client.is_connected(): await u_client.disconnect()
-        if client.is_connected(): await client.disconnect()
+            try:
+                if u_client.is_connected(): await u_client.disconnect()
+            except Exception as disconnect_err:
+                 logger.error(f"Error disconnecting client for user {user_id}: {disconnect_err}")
+        try:
+            if client and client.is_connected(): await client.disconnect()
+        except Exception as disconnect_err:
+            logger.error(f"Error disconnecting main bot client: {disconnect_err}")
         logger.info("Bot shutdown complete.")
 
 
 if __name__ == '__main__':
     # Use asyncio.run() to start the main asynchronous function
     asyncio.run(main())
-
