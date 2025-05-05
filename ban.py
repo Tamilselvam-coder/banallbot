@@ -188,6 +188,6 @@ async def restart(e):
 
 
 print("\n\n")
-print("𝐃𝐀𝐗𝐗 𝐓𝐄𝐀𝐌 𝐁𝐀𝐍 𝐀𝐋𝐋 𝐁𝐎𝐓 𝐃𝐎𝐍𝐄 ")
+print("𝐁𝐀𝐍 𝐀𝐋𝐋 𝐁𝐎𝐓 𝐃𝐎𝐍𝐄 ")
 
 Daxx.run_until_disconnected()
